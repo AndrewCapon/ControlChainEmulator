@@ -1,0 +1,3 @@
+[submodule "cc-slave"]
+	path = cc-slave
+	url = https://github.com/mod-audio/cc-slave.git
