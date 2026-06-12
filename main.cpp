@@ -1,40 +1,116 @@
 #include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include <string.h>
 #include <fcntl.h> 
 #include <errno.h> 
 #include <termios.h> 
-#include <unistd.h> 
 #include <sys/ioctl.h>
 #include <stdint.h>
 #include <time.h>
+#include <signal.h>
 
 #include "control_chain.h"
+
+// USE_POSIX_TIMER==1 Use a posix timer and signal
+// USE_POSIX_TIMER==0 Use a code based timer and non blocking reads. will spin a core up to 100%
+
+#define USE_POSIX_TIMER 1
 
 // serial port
 int nSerialPort;
 
 // Timer shenanigans
 
-struct timespec startTime, nowTime;
-uint32_t uTimerUS = 0;
-uint32_t uElapsedUS = 0;
-bool bTimerActive = false;
-
 extern "C"
 {
   void (*timerCallback)(void);
 
+#if USE_POSIX_TIMER
+  timer_t posixTimerID = (void *)0xBAADF00D;
+
+  void PosixTimerHandler(int, siginfo_t *, void *)
+  {
+    //printf("PosixTimerHandler\n");
+    if(timerCallback)
+      timerCallback();
+  }
+
+  bool CreatePosixTimer(void)
+  {
+    struct sigevent         sigEvent;
+    struct sigaction        sigAction;
+    int                     sigNum = SIGRTMIN;
+
+    sigAction.sa_flags = SA_SIGINFO;
+    sigAction.sa_sigaction = PosixTimerHandler;
+    sigemptyset(&sigAction.sa_mask);
+
+    if (sigaction(sigNum, &sigAction, NULL) == -1)
+    {
+      printf("Error sigaction() failed\n");
+      return false;
+    }
+
+    sigEvent.sigev_notify = SIGEV_SIGNAL;
+    sigEvent.sigev_signo = sigNum;
+
+    if (timer_create(CLOCK_REALTIME, &sigEvent, &posixTimerID) == -1)
+    {
+      printf("Error timer_create() failed\n");
+      return false;
+    }
+
+    return true;
+  }
+
+  bool SetPosixTimer(uint32_t timeUS)
+  {
+    struct itimerspec       intervalTimerSpec;
+
+    time_t seconds = timeUS / 1000000;
+    time_t ns = 1000* (timeUS - (seconds * 1000000));
+    intervalTimerSpec.it_value.tv_sec = seconds;
+    intervalTimerSpec.it_value.tv_nsec = ns;
+    intervalTimerSpec.it_interval.tv_sec = 0;
+    intervalTimerSpec.it_interval.tv_nsec = 0;
+
+    if (timer_settime(posixTimerID, 0, &intervalTimerSpec, NULL) == -1)
+    {
+      printf("Error timer_settime() failed\n");
+      return false;
+    }
+
+    return true;
+  }
+#else // USE_POSIX_TIMER
+  struct timespec startTime, nowTime;
+  uint32_t uTimerUS = 0;
+  uint32_t uElapsedUS = 0;
+  bool bTimerActive = false;
+#endif // USE_POSIX_TIMER
+
   void timer_init(void (*callback)(void))
   {
+    timerCallback = callback;
+#if USE_POSIX_TIMER
+    CreatePosixTimer();
+#else // USE_POSIX_TIMER
     uTimerUS = 0;
     bTimerActive = false;
-    timerCallback = callback;
+#endif // USE_POSIX_TIMER
   }
 
   void timer_set(uint32_t time_us)
   {
+    //printf("timer_set\n");
+
+#if USE_POSIX_TIMER
+    SetPosixTimer(time_us);
+#else // USE_POSIX_TIMER   
     uTimerUS = time_us;
     clock_gettime(CLOCK_MONOTONIC, &startTime);
+#endif // USE_POSIX_TIMER
   }
 
   void delay_us(uint32_t time_us)
@@ -47,9 +123,10 @@ extern "C"
   }
 }
 
+
 // Actuators
-#define buttonPortsCount 4
-#define variablePortsCount 4
+#define buttonPortsCount 8
+#define variablePortsCount 8
 
 struct Actuator
 {
@@ -122,7 +199,7 @@ void eventsCB(void *arg)
   {
     case CC_EV_HANDSHAKE_FAILED :
     {
-      printf("Error handshake failed\n");
+      printf("Handshake failed\n");
       break;
     }
 
@@ -149,13 +226,13 @@ void eventsCB(void *arg)
 
     case CC_EV_DEVICE_DISABLED :
     {
-      printf("Error device disabled\n");
+      printf("Device disabled\n");
       break;
     }
 
     case CC_EV_MASTER_RESETED :
     {
-      printf("Error device reset\n");
+      printf("Device reset\n");
       break;
     }
 
@@ -184,6 +261,7 @@ bool InitialiseSerial(void)
     return false;
   }
 
+#if !USE_POSIX_TIMER
   // set non blocking
   struct termios tty;
 
@@ -203,6 +281,7 @@ bool InitialiseSerial(void)
     close(nSerialPort);
     return false;
   }
+#endif // !USE_POSIX_TIMER
 
   return true;
 }
@@ -216,27 +295,29 @@ void CreateActuators(void)
     // configure buttons 
   for (int i = 0; i < buttonPortsCount; i++) 
   {
-      char sName[40];
-      sprintf(sName, "Button %d", i);
-      cc_actuator_config_t actuator_config;
-      actuator_config.type = CC_ACTUATOR_MOMENTARY;
-      actuator_config.name = sName;
-      actuator_config.value = &buttonValues[i];
-      actuator_config.min = 0.0;
-      actuator_config.max = 1.0;
-      actuator_config.supported_modes = CC_MODE_TOGGLE | CC_MODE_TRIGGER;
-      actuator_config.max_assignments = 1;
+    char sName[40];
+    sprintf(sName, "Button %d", i+1);
+    printf("  Actuator: %s\n", sName);
+    cc_actuator_config_t actuator_config;
+    actuator_config.type = CC_ACTUATOR_MOMENTARY;
+    actuator_config.name = sName;
+    actuator_config.value = &buttonValues[i];
+    actuator_config.min = 0.0;
+    actuator_config.max = 1.0;
+    actuator_config.supported_modes = CC_MODE_TOGGLE | CC_MODE_TRIGGER;
+    actuator_config.max_assignments = 1;
 
-      // create and add actuator to device
-      cc_actuator_t *actuator = cc_actuator_new(&actuator_config);
-      cc_device_actuator_add(device, actuator);
-      actuators[nActuatorCount++].pActuator = actuator;
+    // create and add actuator to device
+    cc_actuator_t *actuator = cc_actuator_new(&actuator_config);
+    cc_device_actuator_add(device, actuator);
+    actuators[nActuatorCount++].pActuator = actuator;
   }
 
   for (int i = 0; i < variablePortsCount; i++) 
   {
     char sName[40];
-    sprintf(sName, "Variable %d", i);
+    sprintf(sName, "Variable %d", i+1);
+    printf("  Actuator: %s\n", sName);
     cc_actuator_config_t actuator_config;
     actuator_config.type = CC_ACTUATOR_CONTINUOUS;
     actuator_config.name = sName;
@@ -256,23 +337,31 @@ void CreateActuators(void)
 int main(int, char**)
 {
   printf("ControlChainEmulator\n");
+  printf("====================\n\n");
 
-  // initialise th serial port
+#if USE_POSIX_TIMER  
+  printf("Using posix timer\n");
+#else //USE_POSIX_TIMER
+  printf("Using non blocking serial and software timer\n");
+#endif // USE_POSIX_TIMER  
+
+  printf("Initialising serial\n");
   if(!InitialiseSerial())
   {
     printf("Serial port failed to inititalise\n");
     return 1;
   }
 
-  // initialise the controlchain
+  printf("Initialising controlchain\n");
   cc_init(responseCB, eventsCB);
 
-  // Set up test actuators
+  printf("Creating actuators\n");
   CreateActuators();
 
-  // read loop
+  printf("Started\n");
   while(true)
   {
+#if !USE_POSIX_TIMER
     // Handle timer
     if(uTimerUS)
     {
@@ -288,6 +377,7 @@ int main(int, char**)
         timerCallback();
       }
     }
+#endif // !USE_POSIX_TIMER
 
     // Handle serial input
     uint8_t buffer [2048];
