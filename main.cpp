@@ -160,15 +160,36 @@ void DisplayAssignment(const char *pszLabel, cc_assignment_t *pAssignment)
 #endif
 }
 
+float SetActuatorFromAssignmentValue(int nActuatorId, float fAssignmentValue)
+{
+  Actuator &act = actuators[nActuatorId];
+
+  float fAssignmentRange = (act.pAssignment->max - act.pAssignment->min);
+  float fAssignmentNormal = (fAssignmentValue - act.pAssignment->min) / fAssignmentRange;
+
+  float fActuatorRange = (act.pActuator->max - act.pActuator->min);
+
+  float fValue = act.pActuator->min + (fActuatorRange*fAssignmentNormal);
+
+  act.fSetValue = act.pActuator->min + (fActuatorRange*fAssignmentNormal);
+
+  return act.fSetValue;
+} 
+
+
 // Callbacks
 void AssignmentCB(cc_assignment_t *pAssignment)
 {
   DisplayAssignment("AssignmentCB", pAssignment);
+
+  actuators[pAssignment->actuator_id].pAssignment = pAssignment;
+  float fValue = SetActuatorFromAssignmentValue(pAssignment->actuator_id, pAssignment->value);
+  printf("  fValue = %f\n", fValue);
 }
 
-void UnassignmentCB(int)
+void UnassignmentCB(int nActuatorId)
 {
-
+  actuators[nActuatorId].pAssignment = nullptr;
 }
 
 void UpdateCB(cc_assignment_t *pAssignment)
@@ -179,6 +200,8 @@ void UpdateCB(cc_assignment_t *pAssignment)
 void SetValueCB(cc_set_value_t *pValue)
 {
   printf("SetValueCB %d, %d, %f\n", pValue->assignment_id, pValue->actuator_id, pValue->value);
+  float fValue = SetActuatorFromAssignmentValue(pValue->actuator_id, pValue->value);
+  printf("  fValue = %f\n", fValue);
 }
 
 
